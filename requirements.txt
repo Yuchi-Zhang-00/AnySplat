@@ -27,7 +27,7 @@ opencv-python
 Pillow
 huggingface_hub
 gradio
-xformers==0.0.24
+xformers==0.0.30
 torch_scatter==2.1.2
 moviepy==1.0.3
 pydantic
