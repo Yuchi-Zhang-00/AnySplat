@@ -22,6 +22,12 @@ def construct_list_of_attributes(num_rest: int) -> list[str]:
         attributes.append(f"rot_{i}")
     return attributes
 
+def to_numpy(x):
+    if isinstance(x, np.ndarray):
+        return x
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    raise TypeError(f"Unsupported type: {type(x)}")
 
 def export_ply(
     means: Float[Tensor, "gaussian 3"],
@@ -32,6 +38,7 @@ def export_ply(
     path: Path,
     shift_and_scale: bool = False,
     save_sh_dc_only: bool = True,
+    R_align: np.ndarray | None = None,
 ):
     if shift_and_scale:
         # Shift the scene so that the median Gaussian is at the origin.
@@ -43,10 +50,19 @@ def export_ply(
         scales = scales / scale_factor
 
     # Apply the rotation to the Gaussian rotations.
-    rotations = R.from_quat(rotations.detach().cpu().numpy()).as_matrix()
-    rotations = R.from_matrix(rotations).as_quat()
-    x, y, z, w = rearrange(rotations, "g xyzw -> xyzw g")
-    rotations = np.stack((w, x, y, z), axis=-1)
+    rot_q = to_numpy(rotations)        # (G, 4) xyzw
+    rot_R = R.from_quat(rot_q).as_matrix()  # (G, 3, 3)
+
+    if R_align is not None:
+        rot_R = R_align @ rot_R        # ⭐ 关键一行
+
+    rot_q_new = R.from_matrix(rot_R).as_quat()  # xyzw
+    x, y, z, w = rot_q_new.T
+    rotations = np.stack((w, x, y, z), axis=-1)  # wxyz
+
+    means = to_numpy(means)
+    if R_align is not None:
+        means = (R_align @ means.T).T
 
     # Since current model use SH_degree = 4,
     # which require large memory to store, we can only save the DC band to save memory.
@@ -56,12 +72,12 @@ def export_ply(
     dtype_full = [(attribute, "f4") for attribute in construct_list_of_attributes(0 if save_sh_dc_only else f_rest.shape[1])]
     elements = np.empty(means.shape[0], dtype=dtype_full)
     attributes = [
-        means.detach().cpu().numpy(),
-        torch.zeros_like(means).detach().cpu().numpy(),
-        f_dc.detach().cpu().contiguous().numpy(),
-        f_rest.detach().cpu().contiguous().numpy(),
-        opacities[..., None].detach().cpu().numpy(),
-        scales.log().detach().cpu().numpy(),
+        means,
+        np.zeros_like(means),
+        to_numpy(f_dc),
+        to_numpy(f_rest),
+        to_numpy(opacities[..., None]),
+        to_numpy(scales.log() if isinstance(scales, torch.Tensor) else np.log(scales)),
         rotations,
     ]
     if save_sh_dc_only:

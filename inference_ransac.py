@@ -50,17 +50,56 @@ def depth_to_points(depth, mask, fx, fy, cx, cy):
     y = (v - cy) * z / fy
 
     return np.stack([x, y, z], axis=1)
+def fit_plane_ransac_safe(points, num_iters=300, dist_thresh=0.005, sample_N=8000):
+    if points.shape[0] > sample_N:
+        idx = np.random.choice(points.shape[0], sample_N, replace=False)
+        pts = points[idx]
+    else:
+        idx = np.arange(points.shape[0])
+        pts = points
 
-#  拟合桌面平面（拿法向量）  用 SVD / 最小二乘（比 RANSAC 简洁，mask 已知）
-def fit_plane(points):
-    if points.shape[0] < 50:
-        raise ValueError("Too few points for plane fitting")
-    
-    centroid = points.mean(axis=0)
-    _, _, Vt = np.linalg.svd(points - centroid, full_matrices=False)
+    best_inliers = None
+    best_count = 0
+    best_normal = None
+    best_center = None
+
+    N = pts.shape[0]
+
+    for _ in range(num_iters):
+        ids = np.random.choice(N, 3, replace=False)
+        p0, p1, p2 = pts[ids]
+
+        normal = np.cross(p1 - p0, p2 - p0)
+        norm = np.linalg.norm(normal)
+        if norm < 1e-6:
+            continue
+        normal /= norm
+        d = -normal @ p0
+
+        dist = np.abs(pts @ normal + d)
+        inliers = dist < dist_thresh
+        count = inliers.sum()
+
+        if count > best_count:
+            best_count = count
+            best_inliers = inliers
+            best_normal = normal
+            best_center = pts[inliers].mean(axis=0)
+
+    if best_normal is None:
+        raise RuntimeError("RANSAC failed")
+
+    # refine normal
+    pts_in = pts[best_inliers]
+    pts_centered = pts_in - pts_in.mean(0)
+    _, _, Vt = np.linalg.svd(pts_centered)
     normal = Vt[-1]
-    normal /= np.linalg.norm(normal)
-    return normal, centroid
+    if normal[2] < 0:
+        normal = -normal
+
+    return normal, best_center, idx[best_inliers]
+
+
 
 # 把点投影到桌面平面
 def project_to_plane(points, normal, point_on_plane):
@@ -171,230 +210,105 @@ def compute_inner_rect_mask(mask, erode_ksize=15, margin=10):
 # print(f"桌面尺寸：{length:.3f} m × {width:.3f} m")
 
 
-
-# def compute_table_geometry(depth, mask, intrinsic, extrinsic=None):
-#     """
-#     使用 cv2.minAreaRect (OBB) 优化后的桌面几何计算
-#     """
-#     H, W = depth.shape
-
-#     # ========== 1. intrinsic（NDC → pixel 适配 AnySplat） ==========
-#     # 注意：AnySplat 的 cx/cy 通常是 0.5 (图像中心)
-#     fx_ndc = intrinsic[0, 0]
-#     fy_ndc = intrinsic[1, 1]
-#     cx_ndc = intrinsic[0, 2]
-#     cy_ndc = intrinsic[1, 2]
-
-#     fx = fx_ndc * W / 2
-#     fy = fy_ndc * H / 2
-#     cx = cx_ndc * W
-#     cy = cy_ndc * H
-
-#     # ========== 2. depth → 点云 ==========
-#     points = depth_to_points(depth, mask, fx, fy, cx, cy)
-
-#     # ========== 3. 拟合桌面平面 ==========
-#     normal, center = fit_plane(points)
-
-#     # 保证法向朝向相机 (Z轴负方向) 或根据需要设定
-#     # 这里的逻辑是确保法向量是桌面的“向上”方向
-#     if normal[2] > 0:
-#         normal = -normal
-
-#     # ========== 4. 建立平面局部坐标系 (u, v) ==========
-#     u, v = plane_coordinate_system(normal)
-
-#     # ========== 5. 投影到 2D 平面 ==========
-#     rel = points - center
-#     pts_2d = np.stack([rel @ u, rel @ v], axis=1).astype(np.float32)
-
-#     # ========== 6. 使用 cv2.minAreaRect 获取稳健的外接矩形 ==========
-#     # rect 返回: ((center_x, center_y), (width, height), angle)
-#     rect = cv2.minAreaRect(pts_2d)
-#     box_2d = cv2.boxPoints(rect) # 得到 4 个角点的 2D 坐标
-    
-#     (rect_cx, rect_cy), (w_val, h_val), angle = rect
-    
-#     # 确定长边和短边及其方向
-#     # 这里的 w_val, h_val 是矩形的两个边长，不一定哪个是长
-#     edge1 = box_2d[1] - box_2d[0]
-#     edge2 = box_2d[2] - box_2d[1]
-    
-#     norm1 = np.linalg.norm(edge1)
-#     norm2 = np.linalg.norm(edge2)
-    
-#     if norm1 > norm2:
-#         length, width = norm1, norm2
-#         dir_long_2d = edge1 / norm1
-#         dir_short_2d = edge2 / norm2
-#     else:
-#         length, width = norm2, norm1
-#         dir_long_2d = edge2 / norm2
-#         dir_short_2d = edge1 / norm1
-
-#     # ========== 7. 将 2D 方向转回 3D ==========
-#     dir_long_3d  = dir_long_2d[0] * u + dir_long_2d[1] * v
-#     dir_short_3d = dir_short_2d[0] * u + dir_short_2d[1] * v
-    
-#     dir_long_3d  /= np.linalg.norm(dir_long_3d)
-#     dir_short_3d /= np.linalg.norm(dir_short_3d)
-
-#     # 重新构建严格正交的右手系: X=长边, Y=宽边, Z=法向
-#     axis_z = -normal # 习惯上让桌面向上为 +Z
-#     axis_x = dir_long_3d
-#     axis_y = np.cross(axis_z, axis_x)
-#     axis_y /= np.linalg.norm(axis_y)
-    
-#     # 再次修正 axis_x 确保完全垂直
-#     axis_x = np.cross(axis_y, axis_z)
-
-#     # ========== 8. 计算 3D 角点 ==========
-#     # 这里的 box_2d 是相对于 pts_2d 坐标系的，需要转回相机/世界 3D 空间
-#     corners_3d = []
-#     for pt in box_2d:
-#         # pt[0] 是在 u 上的分量，pt[1] 是在 v 上的分量
-#         c3d = center + pt[0] * u + pt[1] * v
-#         corners_3d.append(c3d)
-#     corners_3d = np.array(corners_3d)
-
-#     # ========== 9. 构造对齐变换（World -> Aligned Table） ==========
-#     # R_align 的行向量是新的基向量，这样变换后点云会沿轴对齐
-#     R_align = np.stack([axis_x, axis_y, axis_z], axis=0) 
-#     t_align = -R_align @ center
-#      # camera -> world
-#     R_cw = extrinsic[:3, :3]
-#     t_cw = extrinsic[:3, 3]
-
-#     R_wc = R_cw.T
-#     t_wc = -R_wc @ t_cw
-
-#     R_world_align = R_align @ R_cw
-#     t_world_align = R_align @ t_cw + t_align
-
-
-#     return {
-#         "corners_3d": corners_3d,
-#         "length": length,
-#         "width": width,
-#         "dir_long": dir_long_3d,
-#         "dir_short": dir_short_3d,
-#         "normal": normal,
-#         "R_align_cam": R_align,
-#         "t_align_cam": t_align,
-#         "R_align_world": R_world_align,
-#         "t_align_world": t_world_align,
-#     }
-
-
-def compute_table_geometry(depth, mask, intrinsic, extrinsic):
+def compute_table_geometry_ransac(depth, mask, intrinsic, extrinsic):
     """
-    从 depth + mask + 内外参 计算桌面几何，并构造
-    world -> table-aligned (X=长, Y=宽, Z=法向) 的刚体变换
+    使用 RANSAC 平面 + inner PCA
+    构造 world -> table-aligned 变换
     """
-
-    import numpy as np
 
     H, W = depth.shape
 
-    # ========== 1. intrinsic（NDC → pixel） ==========
-    fx_ndc = intrinsic[0, 0]
-    fy_ndc = intrinsic[1, 1]
-    cx_ndc = intrinsic[0, 2]
-    cy_ndc = intrinsic[1, 2]
+    # ===== 1. intrinsic =====
+    fx = intrinsic[0, 0] * W / 2
+    fy = intrinsic[1, 1] * H / 2
+    cx = intrinsic[0, 2] * W
+    cy = intrinsic[1, 2] * H
 
-    fx = fx_ndc * W / 2
-    fy = fy_ndc * H / 2
-    cx = cx_ndc * W
-    cy = cy_ndc * H
-
-    # ========== 2. depth → 点云（camera 坐标） ==========
+    # ===== 2. depth -> camera points =====
     points_cam = depth_to_points(depth, mask, fx, fy, cx, cy)
+    print("points_cam:", points_cam.shape)
 
-    # ========== 3. 拟合桌面平面 ==========
-    normal_cam, center_cam = fit_plane(points_cam)
+    # ===== 3. RANSAC plane =====
+    normal_cam, center_cam, inlier_idx = fit_plane_ransac_safe(
+        points_cam,
+        num_iters=300,
+        dist_thresh=0.015  # 桌面通常很平
+    )
 
-    # 法向统一指向 +Z（相机系）
-    if normal_cam[2] < 0:
-        normal_cam = -normal_cam
+    pts_plane = points_cam[inlier_idx]
 
-    # ========== 4. 平面局部坐标系 ==========
+    # ===== 4. plane coordinate system =====
     u, v = plane_coordinate_system(normal_cam)
 
-    rel = points_cam - center_cam
+    rel = pts_plane - center_cam
     pts_2d = np.stack([rel @ u, rel @ v], axis=1)
 
-    # ========== 5. inner rectangle（鲁棒去边） ==========
+    # ===== 5. inner rectangle =====
     x, y = pts_2d[:, 0], pts_2d[:, 1]
-    x_min, x_max = np.percentile(x, [10, 90])
-    y_min, y_max = np.percentile(y, [10, 90])
+    x_min, x_max = np.percentile(x, [15, 85])
+    y_min, y_max = np.percentile(y, [15, 85])
 
-    inner_mask = (
+    inner = (
         (x > x_min) & (x < x_max) &
         (y > y_min) & (y < y_max)
     )
+    pts_inner = pts_2d[inner]
 
-    pts_2d_inner = pts_2d[inner_mask]
+    if pts_inner.shape[0] < 50:
+        raise RuntimeError("Too few inner RANSAC points")
 
-    # ========== 6. PCA（只在 inner 区域） ==========
-    mean_2d = pts_2d_inner.mean(axis=0)
-    centered = pts_2d_inner - mean_2d
-
+    # ===== 6. PCA on inner =====
+    mean_2d = pts_inner.mean(axis=0)
+    centered = pts_inner - mean_2d
     _, _, Vt = np.linalg.svd(centered, full_matrices=False)
 
-    dir_long_2d  = Vt[0]
-    dir_short_2d = Vt[1]
+    dir_long_2d = Vt[0]
 
-    # ========== 7. 2D → 3D ==========
+    # ===== 7. 2D -> 3D =====
     dir_long_cam = dir_long_2d[0] * u + dir_long_2d[1] * v
     dir_long_cam /= np.linalg.norm(dir_long_cam)
 
-    dir_short_cam = dir_short_2d[0] * u + dir_short_2d[1] * v
-    dir_short_cam /= np.linalg.norm(dir_short_cam)
-
-    # 正交 & 右手系修正
     dir_short_cam = np.cross(normal_cam, dir_long_cam)
     dir_short_cam /= np.linalg.norm(dir_short_cam)
+
     normal_cam = np.cross(dir_long_cam, dir_short_cam)
-    normal_cam /= np.linalg.norm(normal_cam)
 
-    # ========== 8. 世界坐标一致性（可选但强烈建议） ==========
+    # ===== 8. 世界一致性（防翻转） =====
     R_cw = extrinsic[:3, :3]
-    t_cw = extrinsic[:3, 3]
-
-    dir_long_world = R_cw @ dir_long_cam
-    if dir_long_world[0] < 0:
-        dir_long_cam  = -dir_long_cam
+    if (R_cw @ dir_long_cam)[0] < 0:
+        dir_long_cam = -dir_long_cam
         dir_short_cam = -dir_short_cam
 
-    # ========== 9. OBB（在 PCA 坐标系） ==========
-    proj_pca = centered @ Vt[:2].T
-    min_xy = proj_pca.min(axis=0)
-    max_xy = proj_pca.max(axis=0)
+    # ===== 9. OBB 尺寸 =====
+    proj = centered @ Vt[:2].T
+    min_xy, max_xy = proj.min(0), proj.max(0)
 
     length = max_xy[0] - min_xy[0]
     width  = max_xy[1] - min_xy[1]
 
-    corners_2d = np.array([
-        [min_xy[0], min_xy[1]],
-        [max_xy[0], min_xy[1]],
-        [max_xy[0], max_xy[1]],
-        [min_xy[0], max_xy[1]],
-    ])
-
-    # ⭐ 关键：OBB reference 必须是 inner PCA 中心
     center_plane_cam = (
         center_cam
         + mean_2d[0] * u
         + mean_2d[1] * v
     )
 
-    corners_3d_cam = (
+    corners_3d = (
         center_plane_cam
-        + corners_2d[:, 0, None] * dir_long_cam
-        + corners_2d[:, 1, None] * dir_short_cam
+        + np.array([
+            [min_xy[0], min_xy[1]],
+            [max_xy[0], min_xy[1]],
+            [max_xy[0], max_xy[1]],
+            [min_xy[0], max_xy[1]],
+        ])[:, 0, None] * dir_long_cam
+        + np.array([
+            [min_xy[0], min_xy[1]],
+            [max_xy[0], min_xy[1]],
+            [max_xy[0], max_xy[1]],
+            [min_xy[0], max_xy[1]],
+        ])[:, 1, None] * dir_short_cam
     )
 
-    # ========== 10. 构造对齐变换（camera → table） ==========
+    # ===== 10. alignment =====
     R_table_cam = np.stack(
         [dir_long_cam, dir_short_cam, normal_cam],
         axis=1
@@ -403,23 +317,25 @@ def compute_table_geometry(depth, mask, intrinsic, extrinsic):
     R_align_cam = R_table_cam.T
     t_align_cam = -R_align_cam @ center_plane_cam
 
-    # ========== 11. world → table ==========
     R_align_world = R_align_cam @ R_cw
-    t_align_world = R_align_cam @ t_cw + t_align_cam
+    t_align_world = R_align_cam @ extrinsic[:3, 3] + t_align_cam
+
+    print("RANSAC inlier ratio:", len(inlier_idx) / points_cam.shape[0])
+
+
 
     return {
-        "corners_3d": corners_3d_cam,
+        "corners_3d": corners_3d,
         "length": float(length),
         "width": float(width),
+        "normal": normal_cam,
         "dir_long": dir_long_cam,
         "dir_short": dir_short_cam,
-        "normal": normal_cam,
         "R_align_cam": R_align_cam,
         "t_align_cam": t_align_cam,
         "R_align_world": R_align_world,
         "t_align_world": t_align_world,
     }
-
 
 
 def main():
@@ -474,7 +390,7 @@ def main():
     # TODO: 换成你的桌面 mask
     mask = cv2.imread(Path(image_folder) / "../table_mask.png", cv2.IMREAD_GRAYSCALE).astype(np.uint8)  # 0/1
     # mask = compute_inner_rect_mask(mask)
-    result = compute_table_geometry(
+    result = compute_table_geometry_ransac(
         depth=depth,
         mask=mask,
         intrinsic=intrinsic,
@@ -502,7 +418,10 @@ def main():
 
     # image = cv2.imread(img_path)
     # image = cv2.resize(image, (448, 448))  # 和 depth 一致
-    image = images[0].cpu().numpy()
+    # image = images[0].cpu().numpy()
+    image = images[0][0].permute(1, 2, 0).cpu().numpy()
+    image = (image * 255).astype(np.uint8)
+
 
     corners_3d = result["corners_3d"]
 
@@ -528,18 +447,16 @@ def main():
         )
 
     print("桌面点云 z 范围：", points_table[:,2].min(), points_table[:,2].max())
-    export_ply(points_table, gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "aligned_cam_gaussians.ply",R_align=result["R_align_cam"])
+    export_ply(points_table, gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "aligned_cam_gaussians_ransac.ply",R_align=result["R_align_cam"])
     
     points_table = align_points_to_table(
         gaussians.means[0].cpu().numpy(),   # 桌面点云
         result["R_align_world"],
         result["t_align_world"]
         )
-    export_ply(points_table, gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "aligned_world_gaussians.ply",R_align=result["R_align_world"])
+    export_ply(points_table, gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "aligned_world_gaussians_ransac.ply",R_align=result["R_align_world"])
     
-
-
-
+    print(points_table[:,2].min(), points_table[:,2].max())
 
 if __name__ == "__main__":
     main()
