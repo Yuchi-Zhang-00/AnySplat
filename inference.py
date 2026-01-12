@@ -11,165 +11,7 @@ import imageio
 import numpy as np
 from scipy.spatial import ConvexHull
 import cv2
-
-
-def project_points_to_image(points_3d, intrinsic, image_size):
-    """
-    points_3d: (N, 3) 相机坐标系
-    intrinsic: (3,3) NeRF/NDC 内参
-    image_size: (H, W)
-    """
-    H, W = image_size
-
-    fx = intrinsic[0, 0]
-    fy = intrinsic[1, 1]
-    cx = intrinsic[0, 2]
-    cy = intrinsic[1, 2]
-
-    X = points_3d[:, 0]
-    Y = points_3d[:, 1]
-    Z = points_3d[:, 2]
-
-    # 防止除 0
-    eps = 1e-6
-    Z = np.clip(Z, eps, None)
-
-    x_ndc = fx * (X / Z) + cx
-    y_ndc = fy * (Y / Z) + cy
-
-    u = x_ndc * W
-    v = y_ndc * H
-
-    return np.stack([u, v], axis=1)
-# mask内的像素投影到点云
-def depth_to_points(depth, mask, fx, fy, cx, cy):
-    v, u = np.where(mask > 0)
-    z = depth[v, u]
-
-    x = (u - cx) * z / fx
-    y = (v - cy) * z / fy
-
-    return np.stack([x, y, z], axis=1)
-
-#  拟合桌面平面（拿法向量）  用 SVD / 最小二乘（比 RANSAC 简洁，mask 已知）
-def fit_plane(points):
-    if points.shape[0] < 50:
-        raise ValueError("Too few points for plane fitting")
-    
-    centroid = points.mean(axis=0)
-    _, _, Vt = np.linalg.svd(points - centroid, full_matrices=False)
-    normal = Vt[-1]
-    normal /= np.linalg.norm(normal)
-    return normal, centroid
-
-# 把点投影到桌面平面
-def project_to_plane(points, normal, point_on_plane):
-    diff = points - point_on_plane
-    dist = diff @ normal
-    projected = points - np.outer(dist, normal)
-    return projected
-
-# 建立桌面上的 2D 坐标系 1 选两个正交轴：
-def plane_coordinate_system(normal):
-    # 找一个不平行的向量
-    tmp = np.array([1,0,0]) if abs(normal[0]) < 0.9 else np.array([0,1,0])
-    u = np.cross(normal, tmp)
-    u /= np.linalg.norm(u)
-    v = np.cross(normal, u)
-    return u, v
-
-# 将 3D 点 → 2D
-def to_2d(points, origin, u, v):
-    rel = points - origin
-    x = rel @ u
-    y = rel @ v
-    return np.stack([x, y], axis=1)
-
-# 算桌面的“长 × 宽”（重点）
-# ✅ 推荐方法：PCA / Oriented Bounding Box
-# 方法原理 1 桌子可能不是和相机对齐的 2 PCA 能找到 主方向（长边） 3 在 PCA 坐标系中算 min/max
-def length_width_from_2d(points_2d):
-    mean = points_2d.mean(axis=0)
-    centered = points_2d - mean
-
-    U, S, Vt = np.linalg.svd(centered, full_matrices=False)
-    axes = Vt[:2]   # 主轴
-
-    proj = centered @ axes.T
-
-    length = proj[:,0].max() - proj[:,0].min()
-    width  = proj[:,1].max() - proj[:,1].min()
-
-    return length, width
-
-
-def draw_table_on_image(image, corners_px):
-    """
-    image: (H, W, 3) uint8
-    corners_px: (4,2) 像素坐标
-    """
-    img = image.copy()
-    corners_px = corners_px.astype(int)
-
-    # 画角点
-    for i, (u, v) in enumerate(corners_px):
-        cv2.circle(img, (u, v), 6, (0, 0, 255), -1)
-        cv2.putText(
-            img, str(i),
-            (u + 5, v - 5),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6, (255, 0, 0), 2
-        )
-
-    # 画边
-    for i in range(4):
-        p1 = tuple(corners_px[i])
-        p2 = tuple(corners_px[(i + 1) % 4])
-        cv2.line(img, p1, p2, (0, 255, 0), 2)
-
-    return img
-
-
-def align_points_to_table(points, R_align, t_align):
-    """
-    points: (N,3) 世界坐标
-    """
-    return (R_align @ points.T).T + t_align
-
-# 计算最小內接矩形
-def compute_inner_rect_mask(mask, erode_ksize=15, margin=10):
-    kernel = np.ones((erode_ksize, erode_ksize), np.uint8)
-    mask_eroded = cv2.erode(mask, kernel)
-
-    ys, xs = np.where(mask_eroded > 0)
-    if len(xs) == 0:
-        raise ValueError("Eroded mask is empty")
-
-    x_min, x_max = xs.min(), xs.max()
-    y_min, y_max = ys.min(), ys.max()
-
-    inner = np.zeros_like(mask, dtype=np.uint8)
-    inner[
-        y_min+margin : y_max-margin,
-        x_min+margin : x_max-margin
-    ] = 1
-    return inner
-
-#  完整用例
-# points = depth_to_points(depth, mask, K)
-
-# normal, center = fit_plane(points)
-
-# proj_3d = project_to_plane(points, normal, center)
-
-# u, v = plane_coordinate_system(normal)
-
-# points_2d = to_2d(proj_3d, center, u, v)
-
-# length, width = length_width_from_2d(points_2d)
-
-# print(f"桌面尺寸：{length:.3f} m × {width:.3f} m")
-
+from helper_function import *
 
 
 # def compute_table_geometry(depth, mask, intrinsic, extrinsic=None):
@@ -180,15 +22,11 @@ def compute_inner_rect_mask(mask, erode_ksize=15, margin=10):
 
 #     # ========== 1. intrinsic（NDC → pixel 适配 AnySplat） ==========
 #     # 注意：AnySplat 的 cx/cy 通常是 0.5 (图像中心)
-#     fx_ndc = intrinsic[0, 0]
-#     fy_ndc = intrinsic[1, 1]
-#     cx_ndc = intrinsic[0, 2]
-#     cy_ndc = intrinsic[1, 2]
+#     fx = intrinsic[0, 0]
+#     fy = intrinsic[1, 1]
+#     cx = intrinsic[0, 2]
+#     cy = intrinsic[1, 2]
 
-#     fx = fx_ndc * W / 2
-#     fy = fy_ndc * H / 2
-#     cx = cx_ndc * W
-#     cy = cy_ndc * H
 
 #     # ========== 2. depth → 点云 ==========
 #     points = depth_to_points(depth, mask, fx, fy, cx, cy)
@@ -297,15 +135,11 @@ def compute_table_geometry(depth, mask, intrinsic, extrinsic):
     H, W = depth.shape
 
     # ========== 1. intrinsic（NDC → pixel） ==========
-    fx_ndc = intrinsic[0, 0]
-    fy_ndc = intrinsic[1, 1]
-    cx_ndc = intrinsic[0, 2]
-    cy_ndc = intrinsic[1, 2]
+    fx = intrinsic[0, 0]
+    fy = intrinsic[1, 1]
+    cx = intrinsic[0, 2]
+    cy = intrinsic[1, 2]
 
-    fx = fx_ndc * W / 2
-    fy = fy_ndc * H / 2
-    cx = cx_ndc * W
-    cy = cy_ndc * H
 
     # ========== 2. depth → 点云（camera 坐标） ==========
     points_cam = depth_to_points(depth, mask, fx, fy, cx, cy)
@@ -438,7 +272,7 @@ def main():
     # images = ['./test.jpg']
     images = [process_image(img_path) for img_path in images]
     images = torch.stack(images, dim=0).unsqueeze(0).to(device) # [1, K, 3, 448, 448]
-    b, v, _, h, w = images.shape
+    b, v, _, H, W = images.shape
     
     # Run Inference
     gaussians, pred_context_pose, depth_dict = model.inference((images+1)*0.5)
@@ -454,12 +288,16 @@ def main():
     # imageio.imwrite(Path(image_folder) /'depth_visual.png', depth_normalized)
 
     # Save the results
-    pred_all_extrinsic = pred_context_pose['extrinsic']
-    pred_all_intrinsic = pred_context_pose['intrinsic']
+    pred_all_extrinsic = pred_context_pose['extrinsic'][0][0].cpu().numpy()
+    pred_all_intrinsic = pred_context_pose['intrinsic'][0][0].cpu().numpy()
+    pred_all_intrinsic[0, 0] = pred_all_intrinsic[0, 0] * W / 2
+    pred_all_intrinsic[1, 1] = pred_all_intrinsic[1, 1] * H / 2
+    pred_all_intrinsic[0, 2] = pred_all_intrinsic[0, 2] * W
+    pred_all_intrinsic[1, 2] = pred_all_intrinsic[1, 2] * H
     print(f'pred_all_extrinsic,{pred_all_extrinsic}, shape {pred_all_extrinsic.shape}')
-    np.save(Path(image_folder) /'extrinsic.npy', pred_all_extrinsic[0][0].cpu().numpy())
+    np.save(Path(image_folder) /'extrinsic.npy', pred_all_extrinsic)
     print(f'pred_all_intrinsic, {pred_all_intrinsic}, shape {pred_all_intrinsic.shape}')
-    np.save(Path(image_folder) /'intrinsic.npy', pred_all_intrinsic[0][0].cpu().numpy())
+    np.save(Path(image_folder) /'intrinsic.npy', pred_all_intrinsic)
     # save_interpolated_video(pred_all_extrinsic, pred_all_intrinsic, b, h, w, gaussians, image_folder, model.decoder)
     export_ply(gaussians.means[0], gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "gaussians.ply")
     export_ply(gaussians.means[0], gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "centralized_gaussians.ply",shift_and_scale=True)
@@ -468,8 +306,8 @@ def main():
 
     # 你已有的数据
     depth = depth_map                       # (448, 448)
-    intrinsic = pred_all_intrinsic[0][0].cpu().numpy()
-    extrinsic = pred_all_extrinsic[0][0].cpu().numpy()
+    intrinsic = pred_all_intrinsic
+    extrinsic = pred_all_extrinsic
 
     # TODO: 换成你的桌面 mask
     mask = cv2.imread(Path(image_folder) / "../table_mask.png", cv2.IMREAD_GRAYSCALE).astype(np.uint8)  # 0/1
