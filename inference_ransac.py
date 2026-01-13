@@ -31,18 +31,6 @@ def compute_table_geometry_ransac(depth, mask, intrinsic, extrinsic):
     points_cam = depth_to_points(depth, mask, fx, fy, cx, cy)
     print("points_cam:", points_cam.shape)
 
-    # # ===== 2.5 粗 RANSAC（只为 normal）=====
-    # normal_coarse, _, _ = fit_plane_ransac_safe(
-    #     points_cam,
-    #     num_iters=200,
-    #     dist_thresh=0.01
-    # )
-    # # ===== 2.6 3D inner rectangle 过滤 =====
-    # points_inner = filter_points_by_inner_rect_3d(
-    #     points_cam,
-    #     normal_coarse,
-    #     keep_ratio=0.6   # 保留中间 60%
-    # )
     # ===== 3. RANSAC plane =====
     normal_cam, center_cam, inlier_idx = fit_plane_ransac_safe_2(
         # points_inner,
@@ -51,8 +39,6 @@ def compute_table_geometry_ransac(depth, mask, intrinsic, extrinsic):
         dist_thresh=0.005,  # 桌面通常很平
         sample_N=40000
     )
-
-
     print(f' ransan 得到的 normal : {normal_cam}')
 
     pts_plane = points_cam[inlier_idx]
@@ -186,53 +172,51 @@ def main():
         param.requires_grad = False
     
     # Load Images
-    # image_folder = "examples/test"
     image_folder = "examples/new-desk"
     images = sorted([os.path.join(image_folder, f) for f in os.listdir(image_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
-    # images = ['./test.jpg']
     images = [process_image(img_path) for img_path in images]
     images = torch.stack(images, dim=0).unsqueeze(0).to(device) # [1, K, 3, 448, 448]
     b, v, _, H, W = images.shape
     
     # Run Inference
     gaussians, pred_context_pose, depth_dict = model.inference((images+1)*0.5)
-    print(f"type {type(depth_dict['depth'])}, keys {depth_dict.keys()}")
-    print(f"depth map shape {depth_dict['depth'].shape}")
-    # print(depth_dict['depth'])
-    depth_map = depth_dict['depth'][0][0].squeeze().cpu().numpy()
-    np.save(Path(image_folder) /'depth.npy', depth_map)
-    print(f"type {type(depth_map)}, shape {depth_map.shape}, maximum value {depth_map.max()}")
-    # imageio.imwrite('depth.png', depth_map)
-    # 保存可视化版本
-    depth_normalized = ((depth_map - depth_map.min()) / (depth_map.max() - depth_map.min()) * 255).astype(np.uint8)
-    # imageio.imwrite(Path(image_folder) /'../depth_visual1.png', depth_normalized)
 
     # Save the results
     pred_all_extrinsic = pred_context_pose['extrinsic'][0][0].cpu().numpy()
     pred_all_intrinsic = pred_context_pose['intrinsic'][0][0].cpu().numpy()
+    print("raw intrinsic from network:\n", pred_context_pose['intrinsic'][0][0])
+    print("converted fx fy cx cy:",
+        pred_all_intrinsic[0,0],
+        pred_all_intrinsic[1,1],
+        pred_all_intrinsic[0,2],
+        pred_all_intrinsic[1,2])
+    print("expected image center:", W/2, H/2)
     pred_all_intrinsic[0, 0] = pred_all_intrinsic[0, 0] * W / 2
     pred_all_intrinsic[1, 1] = pred_all_intrinsic[1, 1] * H / 2
     pred_all_intrinsic[0, 2] = pred_all_intrinsic[0, 2] * W
     pred_all_intrinsic[1, 2] = pred_all_intrinsic[1, 2] * H
-    print(f'pred_all_extrinsic,{pred_all_extrinsic}, shape {pred_all_extrinsic.shape}')
+    print(f'pred_all_extrinsic, \n{pred_all_extrinsic}, \n shape  {pred_all_extrinsic.shape}')
     np.save(Path(image_folder) /'extrinsic.npy', pred_all_extrinsic)
-    print(f'pred_all_intrinsic, {pred_all_intrinsic}, shape {pred_all_intrinsic.shape}')
+    print(f'pred_all_intrinsic, \n{pred_all_intrinsic}, \n shape  {pred_all_intrinsic.shape}')
     np.save(Path(image_folder) /'intrinsic.npy', pred_all_intrinsic)
-    # save_interpolated_video(pred_all_extrinsic, pred_all_intrinsic, b, h, w, gaussians, image_folder, model.decoder)
-    export_ply(gaussians.means[0], gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "gaussians.ply")
-        # ================= 桌面几何 =================
-
-    # 你已有的数据
-    (H, W) = (448, 448)                            
     intrinsic = pred_all_intrinsic
     extrinsic = pred_all_extrinsic
     gaussian_xyz = gaussians.means[0].detach().cpu().numpy()
-    # depth = depth_map   aynsplat直给的深度图不准确  需要靠3DGS重新渲染depth   
+    # aynsplat直给的深度图不准确  需要靠3DGS重新渲染得到准确的depth  
+    # depth = depth_dict['depth'][0][0].squeeze().cpu().numpy()    
     depth =  render_depth_from_points(gaussian_xyz, intrinsic, extrinsic, H, W)
-    mask = cv2.imread(Path(image_folder) / "../table_mask.png", cv2.IMREAD_GRAYSCALE).astype(np.uint8)  # 0/1
+    np.save(Path(image_folder) /'depth.npy', depth)
+    # 保存可视化版本
+    depth_normalized = ((depth - depth.min()) / (depth.max() - depth.min()) * 255).astype(np.uint8)
+    imageio.imwrite(Path(image_folder) /'../depth_visual.png', depth_normalized)
+    print(f"type {type(depth)}, shape {depth.shape}, maximum value {depth.max()}")
+    # save_interpolated_video(pred_all_extrinsic, pred_all_intrinsic, b, h, w, gaussians, image_folder, model.decoder)
+    export_ply(gaussians.means[0], gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "gaussians.ply")
+        # ================= 桌面几何 =================                     
+
+    mask = cv2.imread(str(Path(image_folder) / "../table_mask.png"), cv2.IMREAD_GRAYSCALE).astype(np.uint8)  # 0/1
     # mask = compute_inner_rect_mask(mask)
     mask = shrink_mask_erode(mask, ratio=0.12)
-    # result = compute_table_geometry_ransac_obb(
     result = compute_table_geometry_ransac(
         depth=depth,
         mask=mask,
@@ -250,16 +234,6 @@ def main():
 
         # ========== 投影桌面四角并画回图像 ==========
 
-    # 读取原图（注意 process_image 做过 resize，这里要同样尺寸）
-    # img_path = sorted([
-    #     os.path.join(image_folder, f)
-    #     for f in os.listdir(image_folder)
-    #     if f.lower().endswith(('.png', '.jpg', '.jpeg'))
-    # ])[0]
-
-    # image = cv2.imread(img_path)
-    # image = cv2.resize(image, (448, 448))  # 和 depth 一致
-    # image = images[0].cpu().numpy()
     image = images[0][0].permute(1, 2, 0).cpu().numpy()
     image = (image * 255).astype(np.uint8)
 

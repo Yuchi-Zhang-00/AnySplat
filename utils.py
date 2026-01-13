@@ -296,6 +296,7 @@ def shrink_mask_erode(mask, ratio=0.1):
 ###############################################################################
 #                                深度信息渲染                                   #
 ###############################################################################
+
 def render_depth_from_points(
     points_world,
     intrinsic,
@@ -315,6 +316,7 @@ def render_depth_from_points(
     z = pts_cam[:, 2]
 
     valid = z > 0
+    print(f"size of valid {np.sum(valid)} / {448*448}")
     pts_cam = pts_cam[valid]
     z = z[valid]
 
