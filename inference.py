@@ -11,7 +11,7 @@ import imageio
 import numpy as np
 from scipy.spatial import ConvexHull
 import cv2
-from helper_function import *
+from utils import *
 
 
 # def compute_table_geometry(depth, mask, intrinsic, extrinsic=None):
@@ -200,6 +200,17 @@ def compute_table_geometry(depth, mask, intrinsic, extrinsic):
         dir_long_cam  = -dir_long_cam
         dir_short_cam = -dir_short_cam
 
+    
+    export_plane_with_axes_bidirectional(
+    "table_svd.ply",
+    plane_points=points_cam,
+    center=center_cam,
+    dir_x=dir_long_cam,
+    dir_y=dir_short_cam,
+    dir_z=normal_cam,
+    axis_length=1
+    )
+
     # ========== 9. OBB（在 PCA 坐标系） ==========
     proj_pca = centered @ Vt[:2].T
     min_xy = proj_pca.min(axis=0)
@@ -240,6 +251,18 @@ def compute_table_geometry(depth, mask, intrinsic, extrinsic):
     # ========== 11. world → table ==========
     R_align_world = R_align_cam @ R_cw
     t_align_world = R_align_cam @ t_cw + t_align_cam
+
+    export_plane_with_axes_bidirectional(
+    "table_transformed_svd.ply",
+    plane_points=points_cam,
+    center=center_cam,
+    dir_x=dir_long_cam,
+    dir_y=dir_short_cam,
+    dir_z=normal_cam,
+    axis_length=1,
+    rotation=R_align_world,
+    translation=t_align_world
+)
 
     return {
         "corners_3d": corners_3d_cam,
@@ -300,14 +323,16 @@ def main():
     np.save(Path(image_folder) /'intrinsic.npy', pred_all_intrinsic)
     # save_interpolated_video(pred_all_extrinsic, pred_all_intrinsic, b, h, w, gaussians, image_folder, model.decoder)
     export_ply(gaussians.means[0], gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "gaussians.ply")
-    export_ply(gaussians.means[0], gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "centralized_gaussians.ply",shift_and_scale=True)
+    # export_ply(gaussians.means[0], gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "centralized_gaussians.ply",shift_and_scale=True)
     
         # ================= 桌面几何 =================
 
     # 你已有的数据
-    depth = depth_map                       # (448, 448)
+    gaussian_xyz = gaussians.means[0].detach().cpu().numpy()
     intrinsic = pred_all_intrinsic
     extrinsic = pred_all_extrinsic
+    # depth = depth_map   aynsplat直给的深度图不准确  需要靠3DGS重新渲染depth   
+    depth =  render_depth_from_points(gaussian_xyz, intrinsic, extrinsic, H, W)
 
     # TODO: 换成你的桌面 mask
     mask = cv2.imread(Path(image_folder) / "../table_mask.png", cv2.IMREAD_GRAYSCALE).astype(np.uint8)  # 0/1
@@ -358,22 +383,13 @@ def main():
     )
 
     print("已保存桌面四角可视化：table_corners_debug.png")
-
-    points_table = align_points_to_table(
-        gaussians.means[0].cpu().numpy(),   # 桌面点云
-        result["R_align_cam"],
-        result["t_align_cam"]
-        )
-
-    print("桌面点云 z 范围：", points_table[:,2].min(), points_table[:,2].max())
-    export_ply(points_table, gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "aligned_cam_gaussians.ply",R_align=result["R_align_cam"])
     
     points_table = align_points_to_table(
-        gaussians.means[0].cpu().numpy(),   # 桌面点云
+        gaussian_xyz,   # 桌面点云
         result["R_align_world"],
         result["t_align_world"]
         )
-    export_ply(points_table, gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "aligned_world_gaussians.ply",R_align=result["R_align_world"])
+    export_ply(points_table, gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "aligned_world_gaussians.ply")
     
 
 

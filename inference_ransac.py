@@ -11,7 +11,7 @@ import imageio
 import numpy as np
 from scipy.spatial import ConvexHull
 import cv2
-from helper_function import *
+from utils import *
 
 def compute_table_geometry_ransac(depth, mask, intrinsic, extrinsic):
     """
@@ -44,12 +44,14 @@ def compute_table_geometry_ransac(depth, mask, intrinsic, extrinsic):
     #     keep_ratio=0.6   # 保留中间 60%
     # )
     # ===== 3. RANSAC plane =====
-    normal_cam, center_cam, inlier_idx = fit_plane_ransac_safe(
+    normal_cam, center_cam, inlier_idx = fit_plane_ransac_safe_2(
         # points_inner,
         points_cam,
         num_iters=600,
-        dist_thresh=0.0015  # 桌面通常很平
+        dist_thresh=0.005,  # 桌面通常很平
+        sample_N=40000
     )
+
 
     print(f' ransan 得到的 normal : {normal_cam}')
 
@@ -89,13 +91,22 @@ def compute_table_geometry_ransac(depth, mask, intrinsic, extrinsic):
     dir_short_cam = np.cross(normal_cam, dir_long_cam)
     dir_short_cam /= np.linalg.norm(dir_short_cam)
 
-    # normal_cam = np.cross(dir_long_cam, dir_short_cam)
-
     # ===== 8. 世界一致性（防翻转） =====
     R_cw = extrinsic[:3, :3]
     if (R_cw @ dir_long_cam)[0] < 0:
         dir_long_cam = -dir_long_cam
         dir_short_cam = -dir_short_cam
+
+    export_plane_with_axes_bidirectional(
+    "table_ransac.ply",
+    plane_points=points_cam,
+    center=center_cam,
+    dir_x=dir_long_cam,
+    dir_y=dir_short_cam,
+    dir_z=normal_cam,
+    axis_length=1
+)
+
 
     # ===== 9. OBB 尺寸 =====
     proj = centered @ Vt[:2].T
@@ -139,133 +150,22 @@ def compute_table_geometry_ransac(depth, mask, intrinsic, extrinsic):
     t_align_world = R_align_cam @ extrinsic[:3, 3] + t_align_cam
 
     print("RANSAC inlier ratio:", len(inlier_idx) / points_cam.shape[0])
-
-
+    export_plane_with_axes_bidirectional(
+    "table_transformed_ransac.ply",
+    plane_points=points_cam,
+    center=center_cam,
+    dir_x=dir_long_cam,
+    dir_y=dir_short_cam,
+    dir_z=normal_cam,
+    axis_length=1,
+    rotation=R_align_world,
+    translation=t_align_world
+)   
 
     return {
         "corners_3d": corners_3d,
         "length": float(length),
         "width": float(width),
-        "normal": normal_cam,
-        "dir_long": dir_long_cam,
-        "dir_short": dir_short_cam,
-        "R_align_cam": R_align_cam,
-        "t_align_cam": t_align_cam,
-        "R_align_world": R_align_world,
-        "t_align_world": t_align_world,
-    }
-
-
-
-def compute_table_geometry_ransac_obb(depth, mask, intrinsic, extrinsic):
-    """
-    RANSAC 平面 + ConvexHull + 最小面积 OBB
-    构造 world -> table-aligned 变换
-    """
-
-    H, W = depth.shape
-
-    # ===== 1. intrinsic =====
-    fx = intrinsic[0, 0]
-    fy = intrinsic[1, 1]
-    cx = intrinsic[0, 2]
-    cy = intrinsic[1, 2]
-
-    # ===== 2. depth -> camera points =====
-    points_cam = depth_to_points(depth, mask, fx, fy, cx, cy)
-    if points_cam.shape[0] < 100:
-        raise RuntimeError("Too few depth points")
-
-    # ===== 3. RANSAC plane =====
-    normal_cam, center_cam, inlier_idx = fit_plane_ransac_safe(
-        points_cam,
-        num_iters=600,
-        dist_thresh=0.002
-    )
-
-    pts_plane = points_cam[inlier_idx]
-
-    # ===== 4. plane coordinate system =====
-    u, v = plane_coordinate_system(normal_cam)
-
-    # 投影到平面 2D
-    rel = pts_plane - center_cam
-    pts_2d = np.stack([rel @ u, rel @ v], axis=1)
-
-    # ===== 5. Convex hull =====
-    hull = ConvexHull(pts_2d)
-    hull_pts = pts_2d[hull.vertices]
-
-    # ===== 6. 最小面积 OBB =====
-    rect = cv2.minAreaRect(hull_pts.astype(np.float32))
-    (cx2d, cy2d), (w, h), angle_deg = rect
-
-    # OpenCV angle: [-90, 0)
-    theta = np.deg2rad(angle_deg)
-    dir_long_2d = np.array([np.cos(theta), np.sin(theta)])
-
-    # 保证 dir_long 是长边
-    if w < h:
-        w, h = h, w
-        dir_long_2d = np.array([-dir_long_2d[1], dir_long_2d[0]])
-
-    dir_short_2d = np.array([-dir_long_2d[1], dir_long_2d[0]])
-
-    # ===== 7. 2D → 3D =====
-    dir_long_cam = dir_long_2d[0] * u + dir_long_2d[1] * v
-    dir_long_cam /= np.linalg.norm(dir_long_cam)
-
-    dir_short_cam = np.cross(normal_cam, dir_long_cam)
-    dir_short_cam /= np.linalg.norm(dir_short_cam)
-
-    normal_cam = np.cross(dir_long_cam, dir_short_cam)
-    normal_cam /= np.linalg.norm(normal_cam)
-
-    # ===== 8. 防翻转（世界一致性） =====
-    R_cw = extrinsic[:3, :3]
-    if (R_cw @ dir_long_cam)[0] < 0:
-        dir_long_cam  = -dir_long_cam
-        dir_short_cam = -dir_short_cam
-
-    # ===== 9. 桌面中心（3D） =====
-    center_plane_cam = (
-        center_cam
-        + cx2d * u
-        + cy2d * v
-    )
-
-    # ===== 10. OBB 四角（可视化用） =====
-    corners_2d = np.array([
-        [-w/2, -h/2],
-        [ w/2, -h/2],
-        [ w/2,  h/2],
-        [-w/2,  h/2],
-    ])
-
-    corners_3d = (
-        center_plane_cam
-        + corners_2d[:, 0, None] * dir_long_cam
-        + corners_2d[:, 1, None] * dir_short_cam
-    )
-
-    # ===== 11. alignment transform =====
-    R_table_cam = np.stack(
-        [dir_long_cam, dir_short_cam, normal_cam],
-        axis=1
-    )
-
-    R_align_cam = R_table_cam.T
-    t_align_cam = -R_align_cam @ center_plane_cam
-
-    R_align_world = R_align_cam @ R_cw
-    t_align_world = R_align_cam @ extrinsic[:3, 3] + t_align_cam
-
-    print("RANSAC inlier ratio:", len(inlier_idx) / points_cam.shape[0])
-
-    return {
-        "corners_3d": corners_3d,
-        "length": float(w),
-        "width": float(h),
         "normal": normal_cam,
         "dir_long": dir_long_cam,
         "dir_short": dir_short_cam,
@@ -305,7 +205,7 @@ def main():
     # imageio.imwrite('depth.png', depth_map)
     # 保存可视化版本
     depth_normalized = ((depth_map - depth_map.min()) / (depth_map.max() - depth_map.min()) * 255).astype(np.uint8)
-    imageio.imwrite(Path(image_folder) /'../depth_visual1.png', depth_normalized)
+    # imageio.imwrite(Path(image_folder) /'../depth_visual1.png', depth_normalized)
 
     # Save the results
     pred_all_extrinsic = pred_context_pose['extrinsic'][0][0].cpu().numpy()
@@ -320,25 +220,18 @@ def main():
     np.save(Path(image_folder) /'intrinsic.npy', pred_all_intrinsic)
     # save_interpolated_video(pred_all_extrinsic, pred_all_intrinsic, b, h, w, gaussians, image_folder, model.decoder)
     export_ply(gaussians.means[0], gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "gaussians.ply")
-    export_ply(gaussians.means[0], gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "centralized_gaussians.ply",shift_and_scale=True)
-    
         # ================= 桌面几何 =================
 
     # 你已有的数据
-    (H, W) = (448, 448)                        
-    
+    (H, W) = (448, 448)                            
     intrinsic = pred_all_intrinsic
     extrinsic = pred_all_extrinsic
-    # depth =  render_depth_from_points(gaussians.means[0].detach().cpu().numpy(), intrinsic, extrinsic, H, W)
-    # epth_normalized = ((depth - depth.min()) / (depth.max() - depth.min()) * 255).astype(np.uint8)
-    # imageio.imwrite(Path(image_folder) /'../depth_visual2.png', depth_normalized)
-    # imageio.imwrite(Path(image_folder) /'../depth_diff.png', abs(depth - depth_map).astype(np.uint8))
-    # print('depth_diff',depth - depth_map)
-    # print('depth diff sum', np.sum(abs(depth - depth_map)))
-    depth = depth_map  
-    # TODO: 换成你的桌面 mask
+    gaussian_xyz = gaussians.means[0].detach().cpu().numpy()
+    # depth = depth_map   aynsplat直给的深度图不准确  需要靠3DGS重新渲染depth   
+    depth =  render_depth_from_points(gaussian_xyz, intrinsic, extrinsic, H, W)
     mask = cv2.imread(Path(image_folder) / "../table_mask.png", cv2.IMREAD_GRAYSCALE).astype(np.uint8)  # 0/1
     # mask = compute_inner_rect_mask(mask)
+    mask = shrink_mask_erode(mask, ratio=0.12)
     # result = compute_table_geometry_ransac_obb(
     result = compute_table_geometry_ransac(
         depth=depth,
@@ -346,7 +239,6 @@ def main():
         intrinsic=intrinsic,
         extrinsic=extrinsic,
     )
-
     print("\n====== 桌面几何结果 ======")
     print("长度 (m):", result["length"])
     print("宽度 (m):", result["width"])
@@ -354,7 +246,6 @@ def main():
     print("长边方向:", result["dir_long"])
     print("宽边方向:", result["dir_short"])
     print("四个角点:\n", result["corners_3d"])
-
 
 
         # ========== 投影桌面四角并画回图像 ==========
@@ -389,24 +280,16 @@ def main():
     )
 
     print("已保存桌面四角可视化：table_corners_debug.png")
-
-    points_table = align_points_to_table(
-        gaussians.means[0].cpu().numpy(),   # 桌面点云
-        result["R_align_cam"],
-        result["t_align_cam"]
-        )
-
-    print("桌面点云 z 范围：", points_table[:,2].min(), points_table[:,2].max())
-    export_ply(points_table, gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "aligned_cam_gaussians_ransac.ply",R_align=result["R_align_cam"])
     
-    points_table = align_points_to_table(
-        gaussians.means[0].cpu().numpy(),   # 桌面点云
+    points_table_world = align_points_to_table(
+        gaussian_xyz,   # 桌面点云
         result["R_align_world"],
         result["t_align_world"]
         )
-    export_ply(points_table, gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "aligned_world_gaussians_ransac.ply",R_align=result["R_align_world"])
+   
+    export_ply(points_table_world, gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "aligned_world_gaussians_ransac.ply")
     
-    print(points_table[:,2].min(), points_table[:,2].max())
+    print(points_table_world[:,2].min(), points_table_world[:,2].max())
 
 if __name__ == "__main__":
     main()
