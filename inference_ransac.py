@@ -182,7 +182,7 @@ def main():
     gaussians, pred_context_pose, depth_dict = model.inference((images+1)*0.5)
 
     # Save the results
-    pred_all_extrinsic = pred_context_pose['extrinsic'][0][0].cpu().numpy()
+    pred_all_extrinsic = pred_context_pose['extrinsic'][0][0].inverse().cpu().numpy()  # anysplat输出的extrinsic是 camere2world
     pred_all_intrinsic = pred_context_pose['intrinsic'][0][0].cpu().numpy()
     print("raw intrinsic from network:\n", pred_context_pose['intrinsic'][0][0])
     print("converted fx fy cx cy:",
@@ -191,10 +191,8 @@ def main():
         pred_all_intrinsic[0,2],
         pred_all_intrinsic[1,2])
     print("expected image center:", W/2, H/2)
-    pred_all_intrinsic[0, 0] = pred_all_intrinsic[0, 0] * W / 2
-    pred_all_intrinsic[1, 1] = pred_all_intrinsic[1, 1] * H / 2
-    pred_all_intrinsic[0, 2] = pred_all_intrinsic[0, 2] * W
-    pred_all_intrinsic[1, 2] = pred_all_intrinsic[1, 2] * H
+    pred_all_intrinsic[0,:] = pred_all_intrinsic[0,:] * W
+    pred_all_intrinsic[1,:] = pred_all_intrinsic[1,:] * H
     print(f'pred_all_extrinsic, \n{pred_all_extrinsic}, \n shape  {pred_all_extrinsic.shape}')
     np.save(Path(image_folder) /'extrinsic.npy', pred_all_extrinsic)
     print(f'pred_all_intrinsic, \n{pred_all_intrinsic}, \n shape  {pred_all_intrinsic.shape}')
@@ -202,8 +200,8 @@ def main():
     intrinsic = pred_all_intrinsic
     extrinsic = pred_all_extrinsic
     gaussian_xyz = gaussians.means[0].detach().cpu().numpy()
-    # aynsplat直给的深度图不准确  需要靠3DGS重新渲染得到准确的depth  
-    # depth = depth_dict['depth'][0][0].squeeze().cpu().numpy()    
+    # aynsplat直给的深度图不准确 ,投影到三维后的桌面跟3DGS的桌面不贴合。
+    # 所以需要靠3DGS重新渲染得到准确的depth  
     depth =  render_depth_from_points(gaussian_xyz, intrinsic, extrinsic, H, W)
     np.save(Path(image_folder) /'depth.npy', depth)
     # 保存可视化版本
@@ -262,6 +260,29 @@ def main():
         )
    
     export_ply(points_table_world, gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "aligned_world_gaussians_ransac.ply")
+
+    x = points_table_world[:,0].copy()
+    y = points_table_world[:,1].copy()
+    points_table_world[:,0] = y
+    points_table_world[:,1] = x
+    points_table_world[:,2] *= -1
+    points_table_world[:,2] += 0.56
+
+    points_table_world[:,0] -= 0.3
+
+    # R = np.array([[1,0,0],
+    #               [0,1,0],
+    #               [0,0,-1]])
+    # t = np.array([-0.5,0,0.56])
+
+    # R = np.array([[0, -1 ,0],
+    #               [1, 0, 0],
+    #               [0, 0, -1]])
+    # t = np.array([0.5,0,-0.56])
+    
+    # points = align_points_to_table(points_table_world, R, t)
+   
+    export_ply(points_table_world, gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "bridge_desk.ply")
     
     print(points_table_world[:,2].min(), points_table_world[:,2].max())
 
