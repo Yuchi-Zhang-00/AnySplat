@@ -191,6 +191,10 @@ def process_single_image(image_path, model, device):
     # 保存深度图
     depth_path = Path(image_folder) / 'depth_ori.npy'
     np.save(depth_path, depth_ori)
+    # 保存可视化深度图
+    depth_ori_normalized = ((depth_ori - depth_ori.min()) / (depth_ori.max() - depth_ori.min()) * 255).astype(np.uint8)
+    depth_ori_visual_path = Path(image_folder) / 'depth_ori_visual.png'
+    imageio.imwrite(depth_ori_visual_path, depth_ori_normalized)
     # Save the results
     pred_all_extrinsic = pred_context_pose['extrinsic'][0][0].inverse().cpu().numpy()  # anysplat输出的extrinsic是 camere2world
     pred_all_intrinsic = pred_context_pose['intrinsic'][0][0].cpu().numpy()
@@ -291,7 +295,7 @@ def process_single_image(image_path, model, device):
         points_table_world[:,0] = y
         points_table_world[:,1] = x
         points_table_world[:,2] *= -1
-        points_table_world[:,2] += 0.55
+        points_table_world[:,2] += 0.56
         points_table_world[:,0] -= 0.4
         
         # 导出对齐后的3D高斯模型
@@ -314,36 +318,33 @@ def process_single_image(image_path, model, device):
 def main():
     parser = argparse.ArgumentParser(description="将一张图像生成为3D高斯模型并输出对应的相机内外参和深度图。")
     parser.add_argument("input_dir", type=str, help="输入的图片所在目录。")
-
-    args = parser.parse_args()
-    input_dir = args.input_dir
+    # 判断输入的是文件还是目录，如果是文件则取其所在目录
     args = parser.parse_args()
     if os.path.isfile(args.input_dir):
         input_dir = os.path.dirname(args.input_dir)
     else:
         input_dir = args.input_dir
-
-     # 查找所有clean_background.png文件
+    
+    
+    # Load the model from Hugging Face (只加载一次)
+    print("正在加载模型...")
+    model = AnySplat.from_pretrained("lhjiang/anysplat")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad = False
+    print("模型加载完成")
+    
+    # 查找所有clean_background.png文件
     clean_background_files = []
     for root, dirs, files in os.walk(input_dir):
         for file in files:
-            print(file.lower())
             if file.lower() == 'clean_background.png' or file.lower() == 'clean_background.jpg':
                 clean_background_files.append(os.path.join(root, file))
     
     print(f"找到 {len(clean_background_files)} 个clean_background.png文件")
     
-    if len(clean_background_files) > 0:
-        # Load the model from Hugging Face (只加载一次)
-        print("正在加载模型...")
-        model = AnySplat.from_pretrained("lhjiang/anysplat")
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = model.to(device)
-        model.eval()
-        for param in model.parameters():
-            param.requires_grad = False
-        print("模型加载完成")
-        
     # 对每个clean_background.png文件进行处理
     for idx, image_path in enumerate(clean_background_files, 1):
         print(f"\n处理第 {idx}/{len(clean_background_files)} 个文件: {image_path}")

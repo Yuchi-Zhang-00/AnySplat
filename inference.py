@@ -22,8 +22,9 @@ def main():
     
     # Load Images
     # image_folder = "examples/test"
-    image_folder = "examples/eggplant"
-    images = sorted([os.path.join(image_folder, f) for f in os.listdir(image_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+    image_folder = "/home/discover/sam3d_gs/data/eggplant"
+    # images = sorted([os.path.join(image_folder, f) for f in os.listdir(image_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg')) and 'clean_background' not in f.lower()])
+    images = [os.path.join(image_folder, f) for f in os.listdir(image_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg')) and 'clean_background' in f.lower()]
     # images = ['./test.jpg']
     images = [process_image(img_path) for img_path in images]
     images = torch.stack(images, dim=0).unsqueeze(0).to(device) # [1, K, 3, 448, 448]
@@ -63,7 +64,9 @@ def main():
     print(depth)
     print(f"type {type(depth)}, shape {depth.shape}, maximum value {depth.max()}")
     # save_interpolated_video(pred_all_extrinsic, pred_all_intrinsic, b, h, w, gaussians, image_folder, model.decoder)
-    export_ply(gaussians.means[0], gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(image_folder) / "gaussians.ply")
+    assets_folder = os.path.join(image_folder, "3d_assets")
+    os.makedirs(assets_folder, exist_ok=True)
+    export_ply(gaussians.means[0], gaussians.scales[0], gaussians.rotations[0], gaussians.harmonics[0], gaussians.opacities[0], Path(assets_folder) / "bg_gaussians.ply")
 
 
 
